@@ -1,0 +1,28 @@
+name: Python Smoke Test
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install starter dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Run a tiny training smoke test
+        run: python train.py --episodes 3 --model-path artifacts/smoke-model.pt
