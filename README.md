@@ -1,150 +1,80 @@
-# Train a Reinforcement Learning Agent to Play Snake
+# Snake RL Challenge - Clayton McCormack
 
-This repository is a starter kit for an interview challenge. A simplified Snake
-environment is provided so candidates can focus on reinforcement learning
-decisions: state design, reward design, training method, evaluation, and
-debugging.
+## Setup
 
-The starter agent is intentionally weak. It runs end to end, but it is only a
-random baseline.
+Create a virtual environment and install dependencies:
 
-## Candidate Task
+    python -m venv .venv
+    .\.venv\Scripts\Activate.ps1
+    python -m pip install -r requirements.txt
 
-Given the simplified Snake environment in `snake_env.py`, train an AI agent that
-survives as long as possible and eats food consistently.
+Run training:
 
-You may use Python with your preferred RL stack, including PyTorch, TensorFlow,
-Gymnasium, Stable-Baselines3, or a hand-written implementation. You do not need
-to achieve a perfect score. You do need to explain your training logic clearly.
+    python train.py --episodes 800 --model-path artifacts/model.pt
 
-## Deliverables
+Run evaluation:
 
-Submit:
+    python evaluate.py --episodes 100 --model-path artifacts/model.pt --seed 123
 
-- `train.py`: training entrypoint
-- `agent.py`: model, policy, replay buffer, feature extraction, or agent logic
-- `README.md`: setup instructions and a short report
-- `model.pt` or equivalent trained model checkpoint
-- Any extra files needed to reproduce your results
+## Report
 
-Your report should explain:
+### Algorithm
 
-- Algorithm used, such as Q-learning, DQN, PPO, or another method
-- State or observation design
-- Reward function design
-- Training duration and compute used
-- Final average score, success rate, and average survival steps
-- Problems encountered and future improvements
+I used a Deep Q-Network (DQN) with experience replay and a target network. DQN fit this problem's discrete 3-action space and small state space well. I considered PPO but ruled it out given the time constraint, since PPO typically needs more tuning to converge reliably and is better suited to continuous action spaces or more complex environments than this one.
 
-## Environment Summary
+### State design
 
-The environment uses a square grid. The snake starts near the center and must
-eat food while avoiding walls and its own body.
+Rather than feeding the raw grid to the network, I encoded an 11-feature state vector:
+- Danger straight, danger right, danger left (whether the next cell in each of those three directions is a wall or the snake's own body)
+- Current direction, one-hot encoded (up, right, down, left)
+- Food direction relative to the head (up, down, left, right)
 
-Action space:
+This compact representation trains much faster than a raw grid input and is directly interpretable, each feature has an obvious meaning, which made debugging straightforward.
 
-- `0`: go straight
-- `1`: turn right
-- `2`: turn left
+### Reward design
 
-Observation returned by `SnakeEnv.step()`:
+I used the reward shaping already built into `snake_env.py`: +10 for eating food, -10 for collision, a small survival reward per step, +0.1 for moving closer to food, -0.1 for moving farther, and a timeout penalty if the snake goes too long without eating. I kept this default rather than override it, since it already addresses the failure mode the assessment calls out.
 
-- `grid`: 2D array with empty cells, snake body, snake head, and food
-- `head`: current head position
-- `food`: current food position
-- `direction`: current direction index
-- `score`: number of food items eaten in the episode
-- `steps`: total episode steps
-- `steps_since_food`: steps since the last food was eaten
+The closer/farther shaping reward is a double-edged sword. It gives the agent a dense learning signal early on, letting it improve before it experiences many food events, but it can also teach a locally greedy policy that doesn't account for the snake's growing body. Late in training, the snake sometimes needs to move away from food to avoid trapping itself with its own tail, and a pure distance-based reward doesn't naturally encourage that. The timeout penalty for going too long without eating is what prevents the specific "looping without eating" failure mode.
 
-You may transform this observation into any state representation you think is
-appropriate.
+### Training duration
 
-## Reward Design
+800 episodes, approximately 3 minutes 36 seconds on CPU (no GPU used).
 
-The starter environment includes a simple shaped reward. You may keep it, tune
-it, or replace it if you can justify the change.
+### Final metrics
 
-Example reward ideas:
+Evaluated over 100 episodes per seed, greedy policy:
 
-- Eat food: `+10`
-- Hit a wall or self: `-10`
-- Survive one step: small positive or negative value
-- Move closer to food: small positive value
-- Move farther from food: small negative value
-- Go too long without eating: light penalty or episode truncation
+| Seed | Avg score | Avg steps | Success rate | Best score |
+|------|-----------|-----------|---------------|------------|
+| 123  | 20.14     | 165.6     | 100%          | 41         |
+| 456  | 19.25     | 154.8     | 100%          | 42         |
+| 789  | 18.55     | 147.4     | 100%          | 35         |
+| 101  | 19.95     | 165.5     | 100%          | 41         |
+| 202  | 19.57     | 160.3     | 100%          | 40         |
+| **Mean** | **19.49** | **158.7** | **100%** | — |
 
-Be prepared to discuss whether reward shaping could teach the wrong behavior,
-such as looping without eating.
+Results are highly consistent across five random seeds: 100% success rate in every run, and average score ranging only from 18.55 to 20.14 (a spread of under 9%). This indicates the learned policy generalizes across different food placement patterns rather than overfitting to one seed.
 
-## Getting Started
+### Baseline comparison
 
-Create a virtual environment and install starter dependencies:
+I compared against the starter repo's RandomAgent, which selects a uniformly random action at every step with no learning. Evaluated under the same conditions as the trained model, 100 episodes per seed across the same five seeds:
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
+| Seed | Avg score | Avg steps | Success rate | Best score |
+|------|-----------|-----------|---------------|------------|
+| 123  | 0.15      | 21.8      | 15%           | 1          |
+| 456  | 0.08      | 20.7      | 8%            | 1          |
+| 789  | 0.10      | 20.0      | 9%            | 2          |
+| 101  | 0.07      | 19.8      | 7%            | 1          |
+| 202  | 0.17      | 22.1      | 14%           | 3          |
+| **Mean** | **0.11** | **20.9** | **10.6%** | — |
 
-On Windows PowerShell:
+The trained DQN agent improved average score by roughly 177x over the random baseline (0.11 to 19.49 mean), raised success rate from 10.6% to 100%, and increased average survival steps more than sevenfold (20.9 to 158.7). This shows the agent learned to actively navigate toward food and avoid collisions, rather than simply surviving passively, since the random agent's occasional low success rate reflects stumbling into food by chance rather than deliberate pursuit.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
-```
+Evaluation command used for the baseline: `python evaluate_baseline.py --episodes 100 --seed <seed>`.
 
-Run the provided tests:
+### Problems encountered and future improvements
 
-```bash
-python -m pytest -q
-```
-
-Run the random baseline:
-
-```bash
-python train.py --episodes 50 --model-path artifacts/random-baseline.pt
-python evaluate.py --episodes 20 --model-path artifacts/random-baseline.pt
-```
-
-## Suggested Timebox
-
-- Take-home: 3 to 4 hours
-- Live discussion: 60 to 90 minutes
-- Follow-up walkthrough: 15 to 20 minutes
-
-## Rules
-
-- Do not copy a complete existing Snake AI project.
-- You may use documentation, libraries, examples, and small snippets, but cite
-  external code sources in your report.
-- Keep the environment simple unless you are explicitly asked to extend it.
-- Prioritize clear reasoning, reproducibility, and debuggability over maximum
-  score.
-
-## Evaluation Guidance
-
-A typical evaluation command:
-
-```bash
-python evaluate.py --episodes 100 --model-path model.pt --seed 123
-```
-
-Suggested metrics:
-
-- Average score
-- Average survival steps
-- Success rate, where success means eating at least one food item
-- Variance across multiple random seeds
-
-## Follow-Up Modifications
-
-During the technical discussion, you may be asked to adapt your solution to one
-small change:
-
-- Two food types: one positive and one negative
-- Random map size
-- Obstacles
-- Partial observability
-- Sparse rewards only when food is eaten
+- Early training was noisy, average score didn't show a clear upward trend until roughly episode 150-200, consistent with the replay buffer needing to fill with varied experience before learning stabilizes.
+- With more time, I'd experiment with a slightly larger hidden layer or a small convolutional encoder over the raw grid to see whether it outperforms the hand-crafted state, particularly for follow-up variations like obstacles or partial observability where the hand-crafted danger features would need redesigning.
+- I'd add reward logging over training (not just score/steps) to more precisely diagnose whether the closer/farther shaping is helping or hurting in later episodes, once the snake is long enough that self-collision risk dominates.
