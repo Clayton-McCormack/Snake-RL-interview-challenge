@@ -1,13 +1,13 @@
-"""Agent for the Snake RL interview challenge.
+"""DQN agent for the Snake RL interview challenge.
 
-Stage 2: added the Q-network and replay buffer building blocks for DQN.
-Still using the random baseline agent as the active policy while these are
-wired together in the next step.
+Implements a small feedforward Deep Q-Network with experience replay and a
+target network, wired into the act / observe / train_step / save / load
+interface that train.py and evaluate.py already call. train.py and
+evaluate.py are left untouched, only this file changes.
 """
 
 from __future__ import annotations
 
-import pickle
 import random
 from collections import deque
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
 STATE_SIZE = 11
 ACTION_SIZE = 3
@@ -91,8 +92,6 @@ def encode_observation(observation: dict[str, Any]) -> np.ndarray:
 
 
 class QNetwork(nn.Module):
-    """Small MLP mapping an 11-feature state to a Q-value per action."""
-
     def __init__(self, state_size: int = STATE_SIZE, action_size: int = ACTION_SIZE, hidden: int = 128):
         super().__init__()
         self.net = nn.Sequential(
@@ -108,9 +107,6 @@ class QNetwork(nn.Module):
 
 
 class ReplayBuffer:
-    """Uniform random experience replay, breaks correlation between
-    consecutive steps so the network doesn't overfit to recent experience."""
-
     def __init__(self, capacity: int = 100_000):
         self.buffer: deque = deque(maxlen=capacity)
 
@@ -132,16 +128,55 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-class RandomAgent:
-    """Baseline agent, still the active policy until DQNAgent is wired up."""
+class DQNAgent:
+    """DQN agent matching the act/observe/train_step/save/load interface
+    that train.py and evaluate.py already call."""
 
-    def __init__(self, action_size: int = 3, seed: int | None = None) -> None:
+    def __init__(
+        self,
+        state_size: int = STATE_SIZE,
+        action_size: int = ACTION_SIZE,
+        seed: int | None = None,
+        lr: float = 1e-3,
+        gamma: float = 0.9,
+        buffer_capacity: int = 100_000,
+        batch_size: int = 256,
+        target_update_freq: int = 100,
+        epsilon_start: float = 1.0,
+        epsilon_end: float = 0.01,
+        epsilon_decay: float = 0.995,
+    ) -> None:
+        if seed is not None:
+            random.seed(seed)
+            torch.manual_seed(seed)
+
+        self.state_size = state_size
         self.action_size = action_size
-        self.rng = np.random.default_rng(seed)
+        self.gamma = gamma
+        self.batch_size = batch_size
+        self.target_update_freq = target_update_freq
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.online_net = QNetwork(state_size, action_size).to(self.device)
+        self.target_net = QNetwork(state_size, action_size).to(self.device)
+        self.target_net.load_state_dict(self.online_net.state_dict())
+        self.target_net.eval()
+
+        self.optimizer = optim.Adam(self.online_net.parameters(), lr=lr)
+        self.buffer = ReplayBuffer(buffer_capacity)
+        self.train_step_count = 0
 
     def act(self, observation: dict[str, Any], training: bool = True) -> int:
-        del observation, training
-        return int(self.rng.integers(self.action_size))
+        state = encode_observation(observation)
+        if training and random.random() < self.epsilon:
+            return random.randrange(self.action_size)
+        with torch.no_grad():
+            state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
+            q_values = self.online_net(state_t)
+            return int(torch.argmax(q_values, dim=1).item())
 
     def observe(
         self,
@@ -151,33 +186,73 @@ class RandomAgent:
         next_observation: dict[str, Any],
         done: bool,
     ) -> None:
-        del observation, action, reward, next_observation, done
+        state = encode_observation(observation)
+        next_state = encode_observation(next_observation)
+        self.buffer.push(state, action, reward, next_state, done)
+        if done:
+            self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
 
     def train_step(self) -> dict[str, float]:
-        return {}
+        if len(self.buffer) < self.batch_size:
+            return {}
+
+        states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
+        states = states.to(self.device)
+        actions = actions.to(self.device)
+        rewards = rewards.to(self.device)
+        next_states = next_states.to(self.device)
+        dones = dones.to(self.device)
+
+        q_values = self.online_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+
+        with torch.no_grad():
+            next_q_values = self.target_net(next_states).max(1)[0]
+            target = rewards + self.gamma * next_q_values * (1 - dones)
+
+        loss = nn.functional.mse_loss(q_values, target)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.train_step_count += 1
+        if self.train_step_count % self.target_update_freq == 0:
+            self.target_net.load_state_dict(self.online_net.state_dict())
+
+        return {"loss": loss.item(), "epsilon": self.epsilon}
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"agent_type": "random", "action_size": self.action_size}
-        with path.open("wb") as file:
-            pickle.dump(payload, file)
+        torch.save(
+            {
+                "agent_type": "dqn",
+                "state_size": self.state_size,
+                "action_size": self.action_size,
+                "model_state_dict": self.online_net.state_dict(),
+                "epsilon": self.epsilon,
+            },
+            path,
+        )
 
     @classmethod
-    def load(cls, path: str | Path, seed: int | None = None) -> "RandomAgent":
+    def load(cls, path: str | Path, seed: int | None = None) -> "DQNAgent":
         path = Path(path)
+        agent = cls(seed=seed)
         if not path.exists():
-            return cls(seed=seed)
-        with path.open("rb") as file:
-            payload = pickle.load(file)
-        return cls(action_size=int(payload.get("action_size", 3)), seed=seed)
+            return agent
+        checkpoint = torch.load(path, map_location=agent.device)
+        agent.online_net.load_state_dict(checkpoint["model_state_dict"])
+        agent.target_net.load_state_dict(checkpoint["model_state_dict"])
+        agent.epsilon = checkpoint.get("epsilon", agent.epsilon_end)
+        return agent
 
 
-def build_agent(seed: int | None = None) -> RandomAgent:
+def build_agent(seed: int | None = None) -> DQNAgent:
     """Factory used by train.py."""
-    return RandomAgent(seed=seed)
+    return DQNAgent(seed=seed)
 
 
-def load_agent(path: str | Path, seed: int | None = None) -> RandomAgent:
+def load_agent(path: str | Path, seed: int | None = None) -> DQNAgent:
     """Load a trained agent for evaluation."""
-    return RandomAgent.load(path, seed=seed)
+    return DQNAgent.load(path, seed=seed)
